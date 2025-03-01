@@ -1,12 +1,12 @@
 import requests
 from io import BytesIO
 import numpy as np
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 import matplotlib as plt
 import cv2
 
 #The manual Homography/Warping worked with:
-#https://www.google.com/url?sa=i&url=https%3A%2F%2Fwww.istockphoto.com%2Fphotos%2Fgirls&psig=AOvVaw0JRkdbvOt5x6VIhDX5XVPC&ust=1740885264404000&source=images&cd=vfe&opi=89978449&ved=0CBQQjRxqFwoTCJimj6fz54sDFQAAAAAdAAAAABAE
+#https://media.istockphoto.com/id/1943833207/photo/woman-playing-in-club-soccer-tournament-giving-daughter-a-hug-on-the-sidelines.jpg?s=612x612&w=is&k=20&c=YAdxq5zrXzZOBD20KefY9bquqadwQ-3emNbp0BHvXvE=
 #https://i.redd.it/bebi64i3kbb31.jpg
 
 '''
@@ -14,7 +14,7 @@ Explain the idea behind your method:
 The drive function is main() of course. This routes the user to retreive Image where I use requests and PIL to request a URL for an image from the user, validates it, then returns it the pillow image object.
 Then in main i transfer the pillow object into the a numpy object for data manipulation using openCV. The user is then ruoted to ruoteUser where they are asked if they wante to use Automatic document detection or Manual point selection.
 
-If the user selects Manual they are asked how many points they want to select (It doesnt work for anything other than 4...) then the user is prompted to select the points and they coordinates are saved.
+If the user selects Manual the image from the URL appears and the user is prompted to select the points. The coordinates they chose are saved in a list for future manipulation.
 The coordinates from the user clicks and the new images corner coordinates are then sent to a Homography function that returns a Homography matrix to warp the image using the users selected points.
 The image is then warped using the created Homography matrix and displayed to the user until they click q and terminate the program.
 
@@ -27,12 +27,11 @@ I then check my saved contoured document and apply K-means to help clear up nois
 I was having a lot of trouble with the automatic detection of the document.
 The first issue I had was only small contours was being detected so I had to figure out a way to filter out the small contours.
 This is when I added a loop and a threshold area size for to try and find the best contour.
-After that The contour being returned was warping and returning an all black image. I was very confused by this and how to fix it however I noticed that the dimensions where dynamic so it was returning dynamic contours on the image.
-I could not figure out how to fix this unfortanately 
+After that the contour being returned was warping and returning an all black image. I was very confused by this and how to fix it however I noticed that the dimensions where dynamic so it was returning dynamic contours on the image.
+I could not figure out how to fix this unfortanately, when trying with a new image it did not do the same thing so I am confused why one image is returning black and the other is not.
 
-
-
-
+One way to improve would be better edge detection. Edge detection to tell the foreground and background apart would be the best way that you can create your contours allowing you to segment your image and creat your warped images.
+Another way would be to create fine tuning algorithms for the hyperparamters such as the thresholds which would tune for each image. This would allow for the algorithm to be dynamic for each image given to it.
 
 '''
 
@@ -83,7 +82,7 @@ def retreiveImage():
         except requests.exceptions.RequestException as e:
             print(f"Error: {e}")
         #Check exception: Error reading Image File
-        except (requests.UnidentifiedImageError, OSError):
+        except (UnidentifiedImageError, OSError):
             print('Invalid Image Format')
 
 def routeUser(image, img2_size, img2_pts):
@@ -135,7 +134,7 @@ def manualPoints(image):
 
     #Create list of coords
     coords = []
-    numOfPoints = int(input('How many points are you getting?'))
+    numOfPoints = 4
 
     #Show image, setup CallBack
     cv2.imshow("Select Points", image)
@@ -213,47 +212,78 @@ def automaticPoints(image):
     Uses polygon approximation (and k-means fallback) to obtain 4 points, and then computes
     a perspective transform to produce a warped (top-down) view of the document.
     '''
-    # greyscale the image
-    grey_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-
-    # smooth image using gaussian kernel
-    smooth_image = cv2.GaussianBlur(grey_image, (7, 7), 5)
-
-    # applying Canny Edge Detection using openCV
-    edges = cv2.Canny(smooth_image, threshold1=50, threshold2=150)
-
-    # need to make edges thicker, more robust edges will make following them easier when it comes to drawing contours. 
+    # Convert to grayscale
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    
+    # Apply Gaussian Blur to reduce noise
+    blurred = cv2.GaussianBlur(gray, (7, 7), 5)
+    
+    # Apply auto Canny edge detection with a more typical sigma value
+    edges = auto_canny(blurred, 0.33)
+    
+    # Dilate edges to make them thicker
     kernel = np.ones((3,3), np.uint8)
     edges = cv2.dilate(edges, kernel, iterations=2)
+    
+    # Find contours in the edge map
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    contourAreaThreshold = 10000
+    contouredDocument = None
 
-    # using openCV's contour method to draw them
-    contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-
-    # need to look through the found contours disregard the ones we know aren't the document by ignoring small contours and smoothing jagged edges using openCV convexing
-    document_contour = None
+    # Loop through contours to find a valid quadrilateral
     for contour in contours:
-        if cv2.contourArea(contour) < 10000:
+        if cv2.contourArea(contour) < contourAreaThreshold:
             continue
-        perimeter = cv2.arcLength(contour, True)
+    
+        # Calculate the arc length and the convex hull of the contour
+        contourArcLength = cv2.arcLength(contour, True)
         contour_hull = cv2.convexHull(contour)
-        approx = cv2.approxPolyDP(contour_hull, 0.007 * perimeter, True)
-        if len(approx) == 4:
-            document_contour = approx
+        
+        # Approximate the contour to a polygon
+        approxImage = cv2.approxPolyDP(contour_hull, 0.007 * contourArcLength, True)
+        
+        # If the approximated contour has 4 points, assume it's the document
+        if len(approxImage) == 4:
+            contouredDocument = approxImage
             break
 
-    # further cleaning the contours if we are noisy, use K-Means to reduce to 4 points
-    if document_contour is None and len(contours) > 0:
+    # Use k-means to reduce to 4 points if contour is still noisy
+    if contouredDocument is None and len(contours) > 0:
         all_points = np.vstack(contours).squeeze()
+        # Apply k-means clustering to get 4 corners
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1)
+        _, _, centers = cv2.kmeans(np.float32(all_points), 4, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+        contouredDocument = centers.astype(int).reshape((-1,1,2))
 
-        # apply K-Means clustering to get 4 corner points
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
-        _, labels, centers = cv2.kmeans(np.float32(all_points), 4, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
-        document_contour = centers.astype(int).reshape((-1,1,2))
+    if contouredDocument is None:
+        print('No Document Found')
+        return None
 
-    # drawing the cleaned quadrilateral
-    detected = cv2.cvtColor(grey_image, cv2.COLOR_GRAY2BGR)
-    cv2.drawContours(detected, [document_contour], -1, (0, 255, 0), 3)  # Draw in green
-    cv2.imshow('detected', detected)
+    # Order the points in a consistent order: top-left, top-right, bottom-right, bottom-left
+    pts = orderPoints(contouredDocument)
+    
+    # Compute dimensions for the warped image
+    widthA = np.linalg.norm(pts[2] - pts[3])
+    widthB = np.linalg.norm(pts[1] - pts[0])
+    maxWidth = int(max(widthA, widthB))
+    
+    heightA = np.linalg.norm(pts[1] - pts[2])
+    heightB = np.linalg.norm(pts[0] - pts[3])
+    maxHeight = int(max(heightA, heightB))
+    
+    # Define destination points for the warped image
+    dst = np.array([
+        [0, 0],
+        [maxWidth - 1, 0],
+        [maxWidth - 1, maxHeight - 1],
+        [0, maxHeight - 1]], dtype="float32")
+    
+    # Compute the perspective transform matrix and apply it
+    M = cv2.getPerspectiveTransform(pts, dst)
+    warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight))
+    
+    return warped
 
 def computeH(im1_pts, im2_pts):
     """
