@@ -5,12 +5,36 @@ from PIL import Image
 import matplotlib as plt
 import cv2
 
-#1)Get Image
-    #How do we do that
+#The manual Homography/Warping worked with:
+#https://www.google.com/url?sa=i&url=https%3A%2F%2Fwww.istockphoto.com%2Fphotos%2Fgirls&psig=AOvVaw0JRkdbvOt5x6VIhDX5XVPC&ust=1740885264404000&source=images&cd=vfe&opi=89978449&ved=0CBQQjRxqFwoTCJimj6fz54sDFQAAAAAdAAAAABAE
+#https://i.redd.it/bebi64i3kbb31.jpg
+
+'''
+Explain the idea behind your method:
+The drive function is main() of course. This routes the user to retreive Image where I use requests and PIL to request a URL for an image from the user, validates it, then returns it the pillow image object.
+Then in main i transfer the pillow object into the a numpy object for data manipulation using openCV. The user is then ruoted to ruoteUser where they are asked if they wante to use Automatic document detection or Manual point selection.
+
+If the user selects Manual they are asked how many points they want to select (It doesnt work for anything other than 4...) then the user is prompted to select the points and they coordinates are saved.
+The coordinates from the user clicks and the new images corner coordinates are then sent to a Homography function that returns a Homography matrix to warp the image using the users selected points.
+The image is then warped using the created Homography matrix and displayed to the user until they click q and terminate the program.
+
+If the user selects Automatic they are not prompted for anything.
+The image is sent from main to the automaticPoints function. In here, I apply a canny edge detector to the image to try and find the contours of the document inside the image. 
+I then loop through all the found contours, approximate their areas as a polygon, and only consider those contours that have areas > thresholdArea.
+If the contour has 4 points, i assume it to be my inlaid document and break out of my contour loop.
+I then check my saved contoured document and apply K-means to help clear up noise.
+
+I was having a lot of trouble with the automatic detection of the document.
+The first issue I had was only small contours was being detected so I had to figure out a way to filter out the small contours.
+This is when I added a loop and a threshold area size for to try and find the best contour.
+After that The contour being returned was warping and returning an all black image. I was very confused by this and how to fix it however I noticed that the dimensions where dynamic so it was returning dynamic contours on the image.
+I could not figure out how to fix this unfortanately 
 
 
 
 
+
+'''
 
 
 def main():
@@ -18,7 +42,7 @@ def main():
     driver function
     '''
     img2_size = (600,400)
-    im2_pts = np.array([[0, 0],[599, 0],[599, 399],[0, 399]])
+    im2_pts = np.array([[0, 0], [0, 599], [399, 599], [399, 0]])
 
     pil_image = retreiveImage()
     #image is a PIL object, transfer it to a NumPy object
@@ -33,9 +57,6 @@ def main():
     cv2.imshow('Warped (Press Q to Close)', warped)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
-
-    
-
 
 def retreiveImage():
     '''
@@ -64,7 +85,6 @@ def retreiveImage():
         #Check exception: Error reading Image File
         except (requests.UnidentifiedImageError, OSError):
             print('Invalid Image Format')
-
 
 def routeUser(image, img2_size, img2_pts):
     '''
@@ -102,7 +122,6 @@ def routeUser(image, img2_size, img2_pts):
         else:
             print('\n--Incorrect Choice--\n')
 
-
 def manualPoints(image):
     '''
     onClick function that retrives coordinate points from a passed in image.
@@ -134,7 +153,6 @@ def manualPoints(image):
     cv2.destroyAllWindows()
     return coords
 
-
 def onClick(event, x, y, flags, param):
     '''
     callBack functionality for manualPoints function. This function is called whenever the cv2.setMouseCallback line is called.
@@ -156,8 +174,6 @@ def onClick(event, x, y, flags, param):
         coordsList.append([x, y])  # Store coordinates
         cv2.circle(image, (x, y), 5, (0, 0, 255), -1)  # Draw a dot
         cv2.imshow("Select Points", image)  # Refresh the image display
-
-
 
 def orderPoints(pts):
     """
@@ -181,94 +197,63 @@ def orderPoints(pts):
     
     return rect
 
+def auto_canny(image, sigma=0.33):
+    """
+    Applies the Canny edge detector using automatically computed threshold values.
+    """
+    v = np.median(image)
+    lower = int(max(0, (1.0 - sigma) * v))
+    upper = int(min(255, (1.0 + sigma) * v))
+    edged = cv2.Canny(image, lower, upper)
+    return edged
+
 def automaticPoints(image):
     '''
-    Performs Canny Edge Detection on the given image to try and find the document.
-    Uses polygon approximation to filter for quadrilaterals and selects the one with the largest area.
-    
-    Steps:
-        1) Convert the image to grayscale.
-        2) Apply a Gaussian Blur to reduce noise.
-        3) Use the Canny Edge Detector to find edges.
-        4) Dilate the edges to make them more robust.
-        5) Find contours in the edge map.
-        6) For contours with area above a threshold, compute their convex hull and approximate them as a polygon.
-        7) If a polygon with 4 vertices is found, assume it’s the document.
-        8) Order the 4 points, compute the perspective transform, and warp the image.
-    
-    Parameters:
-        image: Input image (assumed to be in RGB format).
-    
-    Returns:
-        warped: The warped (top-down) view of the document.
-                Returns None if no valid document contour is found.
+    Performs improved edge detection on the given image to try and find the document.
+    Uses polygon approximation (and k-means fallback) to obtain 4 points, and then computes
+    a perspective transform to produce a warped (top-down) view of the document.
     '''
-    # Convert to grayscale
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    
-    # Apply Gaussian Blur to reduce noise and improve edge detection
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    
-    # Apply Canny Edge Detection
-    edges = cv2.Canny(blurred, 50, 150)
+    # greyscale the image
+    grey_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
-    # Dilate edges to make them thicker
+    # smooth image using gaussian kernel
+    smooth_image = cv2.GaussianBlur(grey_image, (7, 7), 5)
+
+    # applying Canny Edge Detection using openCV
+    edges = cv2.Canny(smooth_image, threshold1=50, threshold2=150)
+
+    # need to make edges thicker, more robust edges will make following them easier when it comes to drawing contours. 
     kernel = np.ones((3,3), np.uint8)
     edges = cv2.dilate(edges, kernel, iterations=2)
-    
-    # Find contours in the edge map
-    contours, hierarchy = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    contourAreaThreshold = 1500
-    contouredDocument = None
 
-    # Loop through contours to find a valid quadrilateral
+    # using openCV's contour method to draw them
+    contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+    # need to look through the found contours disregard the ones we know aren't the document by ignoring small contours and smoothing jagged edges using openCV convexing
+    document_contour = None
     for contour in contours:
-        if cv2.contourArea(contour) < contourAreaThreshold:
+        if cv2.contourArea(contour) < 10000:
             continue
-    
-        # Calculate the arc length and the convex hull of the contour
-        contourArcLength = cv2.arcLength(contour, True)
+        perimeter = cv2.arcLength(contour, True)
         contour_hull = cv2.convexHull(contour)
-        
-        # Approximate the contour to a polygon
-        approxImage = cv2.approxPolyDP(contour_hull, 0.007 * contourArcLength, True)
-        
-        # If the approximated contour has 4 points, assume it's the document
-        if len(approxImage) == 4:
-            contouredDocument = approxImage
+        approx = cv2.approxPolyDP(contour_hull, 0.007 * perimeter, True)
+        if len(approx) == 4:
+            document_contour = approx
             break
 
-    if contouredDocument is None:
-        print("No valid document contour found.")
-        return None
+    # further cleaning the contours if we are noisy, use K-Means to reduce to 4 points
+    if document_contour is None and len(contours) > 0:
+        all_points = np.vstack(contours).squeeze()
 
-    # Order the points in a consistent order: top-left, top-right, bottom-right, bottom-left
-    pts = orderPoints(contouredDocument)
-    
-    # Compute the width of the new image (max distance between points in the horizontal direction)
-    widthA = np.linalg.norm(pts[2] - pts[3])
-    widthB = np.linalg.norm(pts[1] - pts[0])
-    maxWidth = int(max(widthA, widthB))
-    
-    # Compute the height of the new image (max distance between points in the vertical direction)
-    heightA = np.linalg.norm(pts[1] - pts[2])
-    heightB = np.linalg.norm(pts[0] - pts[3])
-    maxHeight = int(max(heightA, heightB))
-    
-    # Define destination points for the warped image: top-left, top-right, bottom-right, bottom-left
-    dst = np.array([
-        [0, 0],
-        [maxWidth - 1, 0],
-        [maxWidth - 1, maxHeight - 1],
-        [0, maxHeight - 1]], dtype="float32")
-    
-    # Compute the perspective transform matrix and apply it
-    M = cv2.getPerspectiveTransform(pts, dst)
-    warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight))
-    
-    return warped
+        # apply K-Means clustering to get 4 corner points
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+        _, labels, centers = cv2.kmeans(np.float32(all_points), 4, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+        document_contour = centers.astype(int).reshape((-1,1,2))
 
+    # drawing the cleaned quadrilateral
+    detected = cv2.cvtColor(grey_image, cv2.COLOR_GRAY2BGR)
+    cv2.drawContours(detected, [document_contour], -1, (0, 255, 0), 3)  # Draw in green
+    cv2.imshow('detected', detected)
 
 def computeH(im1_pts, im2_pts):
     """
