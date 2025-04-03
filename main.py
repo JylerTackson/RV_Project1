@@ -10,6 +10,7 @@ import cv2
 #https://i.redd.it/bebi64i3kbb31.jpg
 
 '''
+Previous: 
 Explain the idea behind your method:
 The drive function is main() of course. This routes the user to retreive Image where I use requests and PIL to request a URL for an image from the user, validates it, then returns it the pillow image object.
 Then in main i transfer the pillow object into the a numpy object for data manipulation using openCV. The user is then ruoted to ruoteUser where they are asked if they wante to use Automatic document detection or Manual point selection.
@@ -33,6 +34,16 @@ I could not figure out how to fix this unfortanately, when trying with a new ima
 One way to improve would be better edge detection. Edge detection to tell the foreground and background apart would be the best way that you can create your contours allowing you to segment your image and creat your warped images.
 Another way would be to create fine tuning algorithms for the hyperparamters such as the thresholds which would tune for each image. This would allow for the algorithm to be dynamic for each image given to it.
 
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+
+New:
+Converted the points in the order points to order them based on cartesian coordinates due to the way I had the img2 points set up.
+I had the img2 points setup as cartesian however the openCV points is not naturally cartesian so it was not transferring correctly.
+
+I was using order points in the automatic... I dont know why, it will naturally get the largest contour and find the points.
+Furthermore I was attempting to dynamically find good thresholds for the autocanny and my calculations where not correct.
+I changed them to 50 & 150 and they are working fine now.
+
 '''
 
 
@@ -41,7 +52,8 @@ def main():
     driver function
     '''
     img2_size = (600,400)
-    im2_pts = np.array([[0, 0], [0, 599], [399, 599], [399, 0]])
+    #bottom left, top left, top right, bottom right
+    im2_pts = np.array([[0, 0], [399, 0], [399, 599], [0, 599]])
 
     pil_image = retreiveImage()
     #image is a PIL object, transfer it to a NumPy object
@@ -132,25 +144,23 @@ def manualPoints(image):
     returns: list of list of coordinates that coorespond to user selected points
     '''
 
-    #Create list of coords
     coords = []
     numOfPoints = 4
-
-    #Show image, setup CallBack
     cv2.imshow("Select Points", image)
+
+    # Callback with "standard cartesian" fix:
     cv2.setMouseCallback("Select Points", onClick, (image, coords))
 
-    #Keep Window responsive 
-    while(len(coords) < numOfPoints):
+    while len(coords) < numOfPoints:
         cv2.waitKey(1)
 
-
-    print("All points Collected:")
-    for i in range(numOfPoints):
-        print(f"Point {i+1}: {coords[i]}")
-
+    # automatically reorder so no matter the click order, the result is consistent
+    pts = np.array(coords, dtype="float32")
+    orderedPts = order_points_cartesian(pts)
+    
+    # If your teacher wants the bottom-left as (0,0), do y_inversion inside onClick!
     cv2.destroyAllWindows()
-    return coords
+    return orderedPts
 
 def onClick(event, x, y, flags, param):
     '''
@@ -170,39 +180,41 @@ def onClick(event, x, y, flags, param):
     image, coordsList = param
 
     if event == cv2.EVENT_LBUTTONDOWN:
-        coordsList.append([x, y])  # Store coordinates
+        new_y = image.shape[0] - y
+        coordsList.append([x, new_y])  # Store coordinates
         cv2.circle(image, (x, y), 5, (0, 0, 255), -1)  # Draw a dot
         cv2.imshow("Select Points", image)  # Refresh the image display
 
-def orderPoints(pts):
+def order_points_cartesian(pts):
     """
-    Orders a set of four points in the following order:
-    top-left, top-right, bottom-right, bottom-left.
+    Given an array of four (x,y) points in arbitrary order, where (0,0)
+    is bottom-left and y increases upward, return them in the order:
+      [bottom-left, bottom-right, top-right, top-left].
     """
-    pts = pts.reshape(4, 2)
     rect = np.zeros((4, 2), dtype="float32")
-    
-    # The top-left point will have the smallest sum,
-    # whereas the bottom-right will have the largest sum.
-    s = pts.sum(axis=1)
+
+    # sums and differences
+    s = pts[:, 0] + pts[:, 1]      # x + y
+    d = pts[:, 1] - pts[:, 0]      # y - x
+
+    # bottom-left  => smallest sum
     rect[0] = pts[np.argmin(s)]
+    # top-right    => largest sum
     rect[2] = pts[np.argmax(s)]
     
-    # The top-right point will have the smallest difference,
-    # whereas the bottom-left will have the largest difference.
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]
-    rect[3] = pts[np.argmax(diff)]
-    
+    # bottom-right => smallest difference (y - x)
+    rect[1] = pts[np.argmin(d)]
+    # top-left     => largest difference
+    rect[3] = pts[np.argmax(d)]
+
     return rect
 
-def auto_canny(image, sigma=0.33):
+def auto_canny(image):
     """
     Applies the Canny edge detector using automatically computed threshold values.
     """
-    v = np.median(image)
-    lower = int(max(0, (1.0 - sigma) * v))
-    upper = int(min(255, (1.0 + sigma) * v))
+    lower = 50
+    upper = 150
     edged = cv2.Canny(image, lower, upper)
     return edged
 
@@ -219,8 +231,9 @@ def automaticPoints(image):
     blurred = cv2.GaussianBlur(gray, (7, 7), 5)
     
     # Apply auto Canny edge detection with a more typical sigma value
-    edges = auto_canny(blurred, 0.33)
-    
+    edges = auto_canny(blurred)
+    cv2.imshow('Edges: ', edges)
+
     # Dilate edges to make them thicker
     kernel = np.ones((3,3), np.uint8)
     edges = cv2.dilate(edges, kernel, iterations=2)
@@ -260,8 +273,8 @@ def automaticPoints(image):
         print('No Document Found')
         return None
 
-    # Order the points in a consistent order: top-left, top-right, bottom-right, bottom-left
-    pts = orderPoints(contouredDocument)
+    # ensure pts are the same shape as the homography points
+    pts = contouredDocument.reshape((4, 2)).astype("float32")
     
     # Compute dimensions for the warped image
     widthA = np.linalg.norm(pts[2] - pts[3])
@@ -368,6 +381,9 @@ def warpImage(img, H, output_size):
 
 def warpImageCV2(img, H, width, height):
     return cv2.warpPerspective(img, H, (width, height))
+
+
+
 
 if __name__ == '__main__':
     main()
